@@ -1,0 +1,839 @@
+{
+  "name": "01 - WhatsApp Calendar Assistant (Main)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "Asistente personal",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-entry",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "asistente-personal"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Extract and validate incoming WhatsApp message\n// Supports Evolution API v2 webhook format\n// ==========================================================\nconst body = $input.first().json.body || $input.first().json;\n\n// Evolution API v2 sends data in body.data\nconst data = body.data || body;\nconst messageData = data.message || data;\n\n// Extract key fields\nconst remoteJid = data.key?.remoteJid || data.remoteJid || '';\nconst fromMe = data.key?.fromMe || false;\nconst pushName = data.pushName || data.senderName || 'Usuario';\nconst messageId = data.key?.id || data.messageId || '';\n\n// Skip messages sent by the bot itself\nif (fromMe) {\n  return [{ json: { skip: true, reason: 'own_message' } }];\n}\n\n// Skip non-user messages (group, status, etc.)\nif (!remoteJid.endsWith('@s.whatsapp.net')) {\n  return [{ json: { skip: true, reason: 'not_personal_chat' } }];\n}\n\n// Extract text from different message types\nlet messageText = '';\nif (messageData.conversation) {\n  messageText = messageData.conversation;\n} else if (messageData.extendedTextMessage?.text) {\n  messageText = messageData.extendedTextMessage.text;\n} else if (messageData.buttonsResponseMessage?.selectedDisplayText) {\n  messageText = messageData.buttonsResponseMessage.selectedDisplayText;\n} else if (messageData.listResponseMessage?.title) {\n  messageText = messageData.listResponseMessage.title;\n} else {\n  // Unsupported message type (audio, image, etc.)\n  return [{ json: {\n    skip: false,\n    unsupported: true,\n    chatId: remoteJid,\n    phoneNumber: remoteJid.replace('@s.whatsapp.net', ''),\n    pushName: pushName\n  } }];\n}\n\n// Clean and trim the message\nmessageText = messageText.trim();\nif (!messageText) {\n  return [{ json: { skip: true, reason: 'empty_message' } }];\n}\n\nreturn [{ json: {\n  skip: false,\n  unsupported: false,\n  chatId: remoteJid,\n  phoneNumber: remoteJid.replace('@s.whatsapp.net', ''),\n  pushName: pushName,\n  messageText: messageText,\n  messageId: messageId,\n  timestamp: new Date().toISOString()\n} }];"
+      },
+      "id": "extract-message",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "skip-check",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "should-skip",
+      "name": "Should Skip?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "unsupported-check",
+              "leftValue": "={{ $json.unsupported }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "unsupported-check",
+      "name": "Unsupported Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $('Extract Message').item.json.phoneNumber }}\",\n  \"options\": {\n    \"delay\": 1200,\n    \"presence\": \"composing\"\n  },\n  \"textMessage\": {\n    \"text\": \"Por ahora solo puedo procesar mensajes de texto ✍️ Probá enviándome un mensaje escrito.\"\n  }\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "reply-unsupported",
+      "name": "Reply: Unsupported Type",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 500],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "documentId": { "__rl": true, "mode": "list", "value": "={{ $env.GOOGLE_SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "Users" },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "chat_id",
+              "lookupValue": "={{ $('Extract Message').item.json.chatId }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-user",
+      "name": "Lookup User in Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Check user authentication state\n// ==========================================================\nconst items = $input.all();\nconst userData = items.length > 0 ? items[0].json : null;\nconst chatId = $('Extract Message').item.json.chatId;\nconst phoneNumber = $('Extract Message').item.json.phoneNumber;\nconst messageText = $('Extract Message').item.json.messageText;\nconst pushName = $('Extract Message').item.json.pushName;\n\nif (!userData || !userData.chat_id) {\n  // New user — not registered yet\n  return [{ json: {\n    authenticated: false,\n    isNewUser: true,\n    chatId: chatId,\n    phoneNumber: phoneNumber,\n    messageText: messageText,\n    pushName: pushName\n  } }];\n}\n\nif (userData.state !== 'active' || !userData.refresh_token) {\n  // Registered but not yet authorized with Google\n  return [{ json: {\n    authenticated: false,\n    isNewUser: false,\n    chatId: chatId,\n    phoneNumber: phoneNumber,\n    messageText: messageText,\n    pushName: pushName\n  } }];\n}\n\n// Check if access token is expired\nconst tokenExpiry = new Date(userData.token_expiry);\nconst now = new Date();\nconst isExpired = now >= tokenExpiry;\n\nreturn [{ json: {\n  authenticated: true,\n  isNewUser: false,\n  chatId: chatId,\n  phoneNumber: phoneNumber,\n  messageText: messageText,\n  pushName: pushName,\n  accessToken: userData.access_token,\n  refreshToken: userData.refresh_token,\n  tokenExpiry: userData.token_expiry,\n  tokenExpired: isExpired,\n  timezone: userData.timezone || 'America/Argentina/Buenos_Aires',\n  pendingAction: userData.pending_action || '',\n  pendingData: userData.pending_data || '',\n  lastAiResponse: userData.last_ai_response || '',\n  turnCount: parseInt(userData.turn_count || '0', 10)\n} }];"
+      },
+      "id": "check-auth",
+      "name": "Check User Auth",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "auth-check",
+              "leftValue": "={{ $json.authenticated }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "is-authenticated",
+      "name": "Is Authenticated?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Handle unauthenticated users\n// Register new users and send OAuth link\n// ==========================================================\nconst chatId = $json.chatId;\nconst phoneNumber = $json.phoneNumber;\nconst pushName = $json.pushName;\n\n// Build the OAuth URL\nconst clientId = $env.GOOGLE_CLIENT_ID;\nconst redirectUri = encodeURIComponent(`${$env.N8N_BASE_URL}/webhook/google-oauth-callback`);\nconst state = Buffer.from(chatId).toString('base64');\nconst scope = encodeURIComponent('https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events');\n\nconst oauthUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&access_type=offline&prompt=consent&state=${state}`;\n\nreturn [{ json: {\n  chatId: chatId,\n  phoneNumber: phoneNumber,\n  pushName: pushName,\n  isNewUser: $json.isNewUser,\n  oauthUrl: oauthUrl\n} }];"
+      },
+      "id": "build-oauth-link",
+      "name": "Build OAuth Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 500]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "list", "value": "={{ $env.GOOGLE_SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "Users" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "chat_id": "={{ $json.chatId }}",
+            "phone_number": "={{ $json.phoneNumber }}",
+            "push_name": "={{ $json.pushName }}",
+            "state": "pending_auth",
+            "created_at": "={{ new Date().toISOString() }}",
+            "timezone": "America/Argentina/Buenos_Aires"
+          }
+        },
+        "options": {}
+      },
+      "id": "register-new-user",
+      "name": "Register New User",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2010, 600],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $('Build OAuth Link').item.json.phoneNumber }}\",\n  \"options\": {\n    \"delay\": 1200,\n    \"presence\": \"composing\"\n  },\n  \"textMessage\": {\n    \"text\": \"👋 ¡Hola {{ $('Build OAuth Link').item.json.pushName }}! Soy tu asistente de calendario.\\n\\nPara empezar, necesito que conectes tu Google Calendar. Hacé click en el siguiente link:\\n\\n🔗 {{ $('Build OAuth Link').item.json.oauthUrl }}\\n\\nDespués de autorizar, ¡ya podés empezar a usarme! 📅\"\n  }\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "send-oauth-link",
+      "name": "Send OAuth Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 500],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "expired-check",
+              "leftValue": "={{ $json.tokenExpired }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "token-expired-check",
+      "name": "Token Expired?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1790, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://oauth2.googleapis.com/token",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/x-www-form-urlencoded" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "client_id", "value": "={{ $env.GOOGLE_CLIENT_ID }}" },
+            { "name": "client_secret", "value": "={{ $env.GOOGLE_CLIENT_SECRET }}" },
+            { "name": "refresh_token", "value": "={{ $('Check User Auth').item.json.refreshToken }}" },
+            { "name": "grant_type", "value": "refresh_token" }
+          ]
+        },
+        "options": {
+          "response": { "response": { "fullResponse": true } },
+          "timeout": 10000
+        }
+      },
+      "id": "refresh-token",
+      "name": "Refresh Access Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2010, 100],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Process refreshed token and update context\n// ==========================================================\nconst response = $input.first().json;\nconst prevData = $('Check User Auth').item.json;\n\nlet accessToken = prevData.accessToken;\nlet tokenExpiry = prevData.tokenExpiry;\n\nif (response.body?.access_token || response.access_token) {\n  const body = response.body || response;\n  accessToken = body.access_token;\n  const expiresIn = body.expires_in || 3600;\n  tokenExpiry = new Date(Date.now() + (expiresIn * 1000)).toISOString();\n}\n\nreturn [{ json: {\n  ...prevData,\n  accessToken: accessToken,\n  tokenExpiry: tokenExpiry,\n  tokenExpired: false\n} }];"
+      },
+      "id": "update-refreshed-token",
+      "name": "Update Refreshed Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2230, 100]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "mode": "list", "value": "={{ $env.GOOGLE_SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "Users" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "access_token": "={{ $json.accessToken }}",
+            "token_expiry": "={{ $json.tokenExpiry }}"
+          }
+        },
+        "options": { "cellFormat": "USER_ENTERED" },
+        "matchingColumns": ["chat_id"],
+        "valueToMatchOn": "={{ $json.chatId }}"
+      },
+      "id": "save-refreshed-token",
+      "name": "Save Refreshed Token",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [2450, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Build the AI Context for OpenAI\n// Replaces all placeholders in the system prompt\n// ==========================================================\nconst data = $input.first().json;\nconst timezone = data.timezone || 'America/Argentina/Buenos_Aires';\n\n// Calculate current date/time in user's timezone\nconst now = new Date();\nconst dateOptions = { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };\nconst currentDatetime = now.toLocaleString('es-AR', dateOptions);\n\nconst dayNames = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];\n// Get day of week in the user's timezone\nconst dayFormatter = new Intl.DateTimeFormat('es-AR', { timeZone: timezone, weekday: 'long' });\nconst currentDayOfWeek = dayFormatter.format(now);\n\n// Current ISO datetime with timezone offset for Argentina (-03:00)\nconst isoNow = now.toISOString().replace('Z', '-03:00');\n\n// Build system message\nlet systemMessage = `Sos un asistente de calendario inteligente que habla en español rioplatense (argentino).\nTu trabajo es interpretar mensajes de usuarios de WhatsApp y extraer la intención\nrelacionada con Google Calendar.\n\nRespondés de forma amigable, concisa y natural — como un asistente personal real,\nno como un bot técnico. Usás \"vos\" en lugar de \"tú\".\n\n## FECHA Y HORA ACTUAL\nZona horaria del usuario: ${timezone}\nFecha y hora actual: ${currentDatetime}\nDía de la semana actual: ${currentDayOfWeek}\nFecha ISO actual: ${isoNow}`;\n\n// Add pending action context if exists\nif (data.pendingAction && data.pendingAction.trim() !== '') {\n  systemMessage += `\\n\\n## CONTEXTO DE CONVERSACIÓN (continuación)\\nATENCIÓN: Hay una acción pendiente de turnos anteriores:\\n- Acción: ${data.pendingAction}\\n- Datos acumulados: ${data.pendingData}\\n- Última respuesta del bot: ${data.lastAiResponse}\\n- Turnos en esta conversación: ${data.turnCount}\\n\\nEl usuario está respondiendo a una pregunta anterior. Integrá su respuesta\\ncon los datos pendientes para completar la acción.`;\n}\n\n// Add interpretation rules\nsystemMessage += `\\n\\n## REGLAS DE INTERPRETACIÓN\\n\\n1. INTENTS DISPONIBLES:\\n   - CREATE: El usuario quiere crear/agendar/programar un evento nuevo\\n   - QUERY: El usuario quiere saber qué eventos tiene (hoy, mañana, esta semana, etc.)\\n   - UPDATE: El usuario quiere modificar/cambiar/mover un evento existente\\n   - DELETE: El usuario quiere borrar/cancelar/eliminar un evento existente\\n   - GENERAL: Saludo, pregunta sobre el bot, tema no relacionado con calendario, agradecimiento\\n\\n2. CAMPOS PARA EVENTOS:\\n   - summary (obligatorio para CREATE): Título/nombre del evento\\n   - start_datetime (obligatorio para CREATE): Formato ISO 8601 con offset de timezone\\n   - end_datetime (obligatorio para CREATE): Si no se especifica duración, asumir 1 hora\\n   - description (opcional): Detalles adicionales del evento\\n   - location (opcional): Lugar del evento\\n\\n3. INTERPRETACIÓN DE FECHAS RELATIVAS (basándote en la fecha/hora actual):\\n   - \"mañana\" = fecha actual + 1 día\\n   - \"pasado mañana\" = fecha actual + 2 días\\n   - \"el lunes\", \"el martes\", etc. = próximo día con ese nombre\\n   - \"la semana que viene\" = lunes de la próxima semana\\n   - \"a la mañana\" = 09:00 si no hay hora específica\\n   - \"al mediodía\" = 12:00\\n   - \"a la tarde\" = 14:00 si no hay hora específica\\n   - \"a la noche\" = 20:00 si no hay hora específica\\n   - \"en una hora\" = hora actual + 1 hora\\n   - \"ahora\" / \"ya\" = hora actual redondeada a los próximos 15 minutos\\n\\n4. CAMPOS OBLIGATORIOS POR INTENT:\\n   - CREATE: summary + start_datetime (end_datetime se puede inferir como +1 hora)\\n   - QUERY: al menos un rango de tiempo (si dice \"mis eventos\" sin fecha, asumir \"hoy\")\\n   - UPDATE: search_query para identificar el evento + al menos un campo a modificar\\n   - DELETE: search_query para identificar el evento a borrar\\n\\n5. MULTI-TURN (conversación de varios pasos):\\n   - Si faltan campos obligatorios, listá los campos faltantes en missing_fields\\n   - Generá una pregunta natural y amigable en response_if_incomplete\\n   - Máximo 3 preguntas de seguimiento\\n   - Si el usuario dice \"cancelar\", \"dejá\", \"no importa\", \"olvidate\" → devolvé intent GENERAL con cancel_pending: true\\n\\n6. CAMBIO DE TEMA:\\n   - Si detectás que el usuario cambió completamente de tema respecto a pending_action,\\n     ignorá el pending_action y procesá el nuevo intent desde cero\\n\\n7. BÚSQUEDA DE EVENTOS (para UPDATE/DELETE):\\n   - El campo search_query debe contener palabras clave para buscar el evento\\n   - Incluí título parcial, nombres de personas, o contexto temporal\\n\\n8. FORMATO DE RESPUESTAS:\\n   - Usá emojis con moderación (✅, 📅, ✏️, 🗑️, 📋)\\n   - Sé conciso pero informativo\\n   - Confirmá siempre los datos antes de ejecutar\\n   - Para QUERY: no generés response_text, el sistema lo genera con los eventos reales`;\n\n// Add strict JSON format\nsystemMessage += `\\n\\n## FORMATO DE RESPUESTA (JSON estricto, sin comentarios, sin texto adicional)\\n\\n{\\n  \"intent\": \"CREATE|UPDATE|DELETE|QUERY|GENERAL\",\\n  \"summary\": \"string o null\",\\n  \"start_datetime\": \"string ISO 8601 con timezone o null\",\\n  \"end_datetime\": \"string ISO 8601 con timezone o null\",\\n  \"description\": \"string o null\",\\n  \"location\": \"string o null\",\\n  \"missing_fields\": [\"array de nombres de campos obligatorios faltantes\"],\\n  \"response_if_incomplete\": \"string - pregunta natural al usuario si faltan campos, o null\",\\n  \"search_query\": \"string - palabras clave para buscar evento existente (UPDATE/DELETE), o null\",\\n  \"query_time_min\": \"string ISO 8601 - inicio del rango para QUERY, o null\",\\n  \"query_time_max\": \"string ISO 8601 - fin del rango para QUERY, o null\",\\n  \"response_text\": \"string - respuesta al usuario para GENERAL, o confirmación para CREATE/UPDATE/DELETE, o null\",\\n  \"cancel_pending\": false\\n}`;\n\nreturn [{ json: {\n  ...data,\n  systemMessage: systemMessage,\n  userMessage: data.messageText\n} }];"
+      },
+      "id": "build-ai-context",
+      "name": "Build AI Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2670, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o\",\n  \"temperature\": 0.1,\n  \"max_tokens\": 500,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": {{ JSON.stringify($json.systemMessage) }}\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.userMessage) }}\n    }\n  ]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "call-openai",
+      "name": "Call OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2890, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Parse OpenAI response and route by intent\n// ==========================================================\nconst prevData = $('Build AI Context').item.json;\nconst response = $input.first().json;\n\n// Handle API errors\nif (response.error || !response.choices?.[0]?.message?.content) {\n  return [{ json: {\n    ...prevData,\n    intent: 'ERROR',\n    responseText: 'Perdón, tuve un problema procesando tu mensaje. ¿Podés intentar de nuevo? 🙏',\n    aiResponse: null\n  } }];\n}\n\n// Parse the JSON response from OpenAI\nlet aiResponse;\ntry {\n  aiResponse = JSON.parse(response.choices[0].message.content);\n} catch (e) {\n  return [{ json: {\n    ...prevData,\n    intent: 'ERROR',\n    responseText: 'Perdón, no pude entender la respuesta. ¿Podés reformular tu mensaje? 🤔',\n    aiResponse: null\n  } }];\n}\n\nreturn [{ json: {\n  ...prevData,\n  intent: aiResponse.intent || 'GENERAL',\n  summary: aiResponse.summary,\n  startDatetime: aiResponse.start_datetime,\n  endDatetime: aiResponse.end_datetime,\n  description: aiResponse.description,\n  location: aiResponse.location,\n  missingFields: aiResponse.missing_fields || [],\n  responseIfIncomplete: aiResponse.response_if_incomplete,\n  searchQuery: aiResponse.search_query,\n  queryTimeMin: aiResponse.query_time_min,\n  queryTimeMax: aiResponse.query_time_max,\n  responseText: aiResponse.response_text,\n  cancelPending: aiResponse.cancel_pending || false,\n  aiResponse: aiResponse\n} }];"
+      },
+      "id": "parse-ai-response",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3110, 200]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "outputIndex": 0, "conditions": { "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "CREATE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" } },
+            { "outputIndex": 1, "conditions": { "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "QUERY", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" } },
+            { "outputIndex": 2, "conditions": { "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "UPDATE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" } },
+            { "outputIndex": 3, "conditions": { "conditions": [{ "leftValue": "={{ $json.intent }}", "rightValue": "DELETE", "operator": { "type": "string", "operation": "equals" } }], "combinator": "and" } }
+          ],
+          "fallbackOutput": 4
+        }
+      },
+      "id": "route-intent",
+      "name": "Route by Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [3330, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Handle CREATE intent\n// If missing_fields → multi-turn, else → create event\n// ==========================================================\nconst data = $input.first().json;\n\nif (data.missingFields && data.missingFields.length > 0) {\n  // Incomplete — need more info\n  return [{ json: {\n    ...data,\n    action: 'ask_more_info',\n    replyText: data.responseIfIncomplete || '¿Podés darme más detalles para agendar el evento?'\n  } }];\n}\n\n// Complete — ready to create event in Google Calendar\nreturn [{ json: {\n  ...data,\n  action: 'create_event',\n  replyText: data.responseText || '✅ Evento agendado.'\n} }];"
+      },
+      "id": "handle-create",
+      "name": "Handle CREATE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3560, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "create-complete",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "create_event",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "create-complete-check",
+      "name": "Create Complete?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3780, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.accessToken }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"summary\": {{ JSON.stringify($json.summary) }},\n  \"description\": {{ $json.description ? JSON.stringify($json.description) : '\"\"' }},\n  \"location\": {{ $json.location ? JSON.stringify($json.location) : '\"\"' }},\n  \"start\": {\n    \"dateTime\": \"{{ $json.startDatetime }}\",\n    \"timeZone\": \"{{ $json.timezone }}\"\n  },\n  \"end\": {\n    \"dateTime\": \"{{ $json.endDatetime }}\",\n    \"timeZone\": \"{{ $json.timezone }}\"\n  }\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-create-event",
+      "name": "Google: Create Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4000, -50],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('Parse AI Response').item.json.accessToken }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "timeMin", "value": "={{ $('Parse AI Response').item.json.queryTimeMin }}" },
+            { "name": "timeMax", "value": "={{ $('Parse AI Response').item.json.queryTimeMax }}" },
+            { "name": "singleEvents", "value": "true" },
+            { "name": "orderBy", "value": "startTime" },
+            { "name": "maxResults", "value": "20" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-query-events",
+      "name": "Google: Query Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3560, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Format query results into WhatsApp-friendly text\n// ==========================================================\nconst prevData = $('Parse AI Response').item.json;\nconst response = $input.first().json;\n\nif (response.error || !response.items) {\n  return [{ json: {\n    ...prevData,\n    action: 'reply',\n    replyText: 'Perdón, no pude consultar tu calendario. ¿Podés intentar de nuevo? 🙏'\n  } }];\n}\n\nconst events = response.items || [];\n\nif (events.length === 0) {\n  return [{ json: {\n    ...prevData,\n    action: 'reply',\n    replyText: '📋 No tenés eventos agendados en ese período. ¡Calendario libre! 🎉'\n  } }];\n}\n\n// Format events into a readable list\nconst timezone = prevData.timezone || 'America/Argentina/Buenos_Aires';\nconst timeOpts = { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false };\nconst dateOpts = { timeZone: timezone, weekday: 'short', day: 'numeric', month: 'short' };\n\nlet eventList = events.map((event, i) => {\n  const start = event.start?.dateTime ? new Date(event.start.dateTime) : null;\n  const end = event.end?.dateTime ? new Date(event.end.dateTime) : null;\n  const title = event.summary || 'Sin título';\n\n  if (start) {\n    const timeStr = start.toLocaleTimeString('es-AR', timeOpts);\n    const endStr = end ? end.toLocaleTimeString('es-AR', timeOpts) : '';\n    const dateStr = start.toLocaleDateString('es-AR', dateOpts);\n    return `${i + 1}. 📅 *${title}*\\n   ${dateStr} — ${timeStr}${endStr ? ' a ' + endStr : ''}`;\n  } else {\n    // All-day event\n    return `${i + 1}. 📅 *${title}* (todo el día)`;\n  }\n}).join('\\n\\n');\n\nconst header = events.length === 1 ? 'Tenés *1 evento*:' : `Tenés *${events.length} eventos*:`;\n\nreturn [{ json: {\n  ...prevData,\n  action: 'reply',\n  replyText: `📋 ${header}\\n\\n${eventList}`\n} }];"
+      },
+      "id": "format-query-results",
+      "name": "Format Query Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3780, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Handle UPDATE intent\n// Search for the event, then update it\n// ==========================================================\nconst data = $input.first().json;\n\nif (data.missingFields && data.missingFields.length > 0) {\n  return [{ json: {\n    ...data,\n    action: 'ask_more_info',\n    replyText: data.responseIfIncomplete || '¿Qué evento querés modificar y cómo?'\n  } }];\n}\n\nreturn [{ json: {\n  ...data,\n  action: 'update_event',\n  replyText: data.responseText || '✏️ Evento actualizado.'\n} }];"
+      },
+      "id": "handle-update",
+      "name": "Handle UPDATE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3560, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.accessToken }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $json.searchQuery }}" },
+            { "name": "timeMin", "value": "={{ $json.queryTimeMin || new Date().toISOString() }}" },
+            { "name": "singleEvents", "value": "true" },
+            { "name": "orderBy", "value": "startTime" },
+            { "name": "maxResults", "value": "5" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-search-for-update",
+      "name": "Google: Search for Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3780, 370],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Update the found event\n// ==========================================================\nconst prevData = $('Handle UPDATE').item.json;\nconst response = $input.first().json;\n\nif (response.error || !response.items || response.items.length === 0) {\n  return [{ json: {\n    ...prevData,\n    action: 'reply',\n    replyText: '🤔 No encontré el evento que querés modificar. ¿Podés darme más detalles?'\n  } }];\n}\n\n// Take the first matching event\nconst event = response.items[0];\nconst eventId = event.id;\n\n// Build update body with only changed fields\nconst updateBody = {};\nif (prevData.summary) updateBody.summary = prevData.summary;\nif (prevData.description) updateBody.description = prevData.description;\nif (prevData.location) updateBody.location = prevData.location;\nif (prevData.startDatetime) {\n  updateBody.start = { dateTime: prevData.startDatetime, timeZone: prevData.timezone };\n}\nif (prevData.endDatetime) {\n  updateBody.end = { dateTime: prevData.endDatetime, timeZone: prevData.timezone };\n}\n\nreturn [{ json: {\n  ...prevData,\n  eventId: eventId,\n  eventTitle: event.summary,\n  updateBody: updateBody,\n  replyText: prevData.replyText\n} }];"
+      },
+      "id": "prepare-update",
+      "name": "Prepare Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4000, 370]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events/{{ $json.eventId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.accessToken }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.updateBody) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-update-event",
+      "name": "Google: Update Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4220, 370],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Handle DELETE intent\n// ==========================================================\nconst data = $input.first().json;\n\nif (data.missingFields && data.missingFields.length > 0) {\n  return [{ json: {\n    ...data,\n    action: 'ask_more_info',\n    replyText: data.responseIfIncomplete || '¿Qué evento querés eliminar?'\n  } }];\n}\n\nreturn [{ json: {\n  ...data,\n  action: 'delete_event',\n  replyText: data.responseText || '🗑️ Evento eliminado.'\n} }];"
+      },
+      "id": "handle-delete",
+      "name": "Handle DELETE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3560, 600]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.accessToken }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $json.searchQuery }}" },
+            { "name": "timeMin", "value": "={{ $json.queryTimeMin || new Date().toISOString() }}" },
+            { "name": "timeMax", "value": "={{ $json.queryTimeMax || '' }}" },
+            { "name": "singleEvents", "value": "true" },
+            { "name": "orderBy", "value": "startTime" },
+            { "name": "maxResults", "value": "5" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-search-for-delete",
+      "name": "Google: Search for Delete",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3780, 600],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Delete the found event\n// ==========================================================\nconst prevData = $('Handle DELETE').item.json;\nconst response = $input.first().json;\n\nif (response.error || !response.items || response.items.length === 0) {\n  return [{ json: {\n    ...prevData,\n    action: 'reply',\n    replyText: '🤔 No encontré el evento que querés eliminar. ¿Podés darme más detalles?'\n  } }];\n}\n\nconst event = response.items[0];\n\nreturn [{ json: {\n  ...prevData,\n  eventId: event.id,\n  eventTitle: event.summary,\n  replyText: prevData.replyText\n} }];"
+      },
+      "id": "prepare-delete",
+      "name": "Prepare Delete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4000, 600]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://www.googleapis.com/calendar/v3/calendars/primary/events/{{ $json.eventId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.accessToken }}" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "google-delete-event",
+      "name": "Google: Delete Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4220, 600],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Handle GENERAL intent and errors\n// ==========================================================\nconst data = $input.first().json;\n\nreturn [{ json: {\n  ...data,\n  action: 'reply',\n  replyText: data.responseText || 'Hola 👋 ¿En qué te puedo ayudar con tu calendario?'\n} }];"
+      },
+      "id": "handle-general",
+      "name": "Handle GENERAL / Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3560, 800]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================\n// Merge all branches and prepare final reply\n// ==========================================================\nconst data = $input.first().json;\n\nconst chatId = data.chatId;\nconst phoneNumber = data.phoneNumber;\nconst intent = data.intent || 'GENERAL';\nconst replyText = data.replyText || data.responseText || 'Perdón, no pude procesar tu mensaje. 🙏';\nconst action = data.action || 'reply';\n\n// Determine if we need to save pending state\nlet newPendingAction = '';\nlet newPendingData = '';\nlet newLastAiResponse = '';\nlet newTurnCount = 0;\n\nif (action === 'ask_more_info') {\n  // Multi-turn: save state for next message\n  newPendingAction = intent;\n  const pendingFields = {};\n  if (data.summary) pendingFields.summary = data.summary;\n  if (data.startDatetime) pendingFields.start_datetime = data.startDatetime;\n  if (data.endDatetime) pendingFields.end_datetime = data.endDatetime;\n  if (data.description) pendingFields.description = data.description;\n  if (data.location) pendingFields.location = data.location;\n  if (data.searchQuery) pendingFields.search_query = data.searchQuery;\n  newPendingData = JSON.stringify(pendingFields);\n  newLastAiResponse = replyText;\n  newTurnCount = (data.turnCount || 0) + 1;\n} else if (data.cancelPending) {\n  // User cancelled pending action - clear state\n  newPendingAction = '';\n  newPendingData = '';\n  newLastAiResponse = '';\n  newTurnCount = 0;\n}\n\nreturn [{ json: {\n  chatId: chatId,\n  phoneNumber: phoneNumber,\n  replyText: replyText,\n  intent: intent,\n  action: action,\n  newPendingAction: newPendingAction,\n  newPendingData: newPendingData,\n  newLastAiResponse: newLastAiResponse,\n  newTurnCount: newTurnCount\n} }];"
+      },
+      "id": "prepare-reply",
+      "name": "Prepare Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4500, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "mode": "list", "value": "={{ $env.GOOGLE_SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "Users" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "pending_action": "={{ $json.newPendingAction }}",
+            "pending_data": "={{ $json.newPendingData }}",
+            "last_ai_response": "={{ $json.newLastAiResponse }}",
+            "turn_count": "={{ $json.newTurnCount }}"
+          }
+        },
+        "options": { "cellFormat": "USER_ENTERED" },
+        "matchingColumns": ["chat_id"],
+        "valueToMatchOn": "={{ $json.chatId }}"
+      },
+      "id": "update-user-state",
+      "name": "Update User State",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [4720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_API_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $env.EVOLUTION_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phoneNumber }}\",\n  \"options\": {\n    \"delay\": 1200,\n    \"presence\": \"composing\"\n  },\n  \"textMessage\": {\n    \"text\": {{ JSON.stringify($json.replyText) }}\n  }\n}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "send-whatsapp-reply",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4940, 300],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [
+        [{ "node": "Extract Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Message": {
+      "main": [
+        [{ "node": "Should Skip?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Should Skip?": {
+      "main": [
+        [],
+        [{ "node": "Unsupported Message?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Unsupported Message?": {
+      "main": [
+        [{ "node": "Reply: Unsupported Type", "type": "main", "index": 0 }],
+        [{ "node": "Lookup User in Sheets", "type": "main", "index": 0 }]
+      ]
+    },
+    "Lookup User in Sheets": {
+      "main": [
+        [{ "node": "Check User Auth", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check User Auth": {
+      "main": [
+        [{ "node": "Is Authenticated?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is Authenticated?": {
+      "main": [
+        [{ "node": "Token Expired?", "type": "main", "index": 0 }],
+        [{ "node": "Build OAuth Link", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build OAuth Link": {
+      "main": [
+        [
+          { "node": "Register New User", "type": "main", "index": 0 },
+          { "node": "Send OAuth Link", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Token Expired?": {
+      "main": [
+        [{ "node": "Refresh Access Token", "type": "main", "index": 0 }],
+        [{ "node": "Build AI Context", "type": "main", "index": 0 }]
+      ]
+    },
+    "Refresh Access Token": {
+      "main": [
+        [{ "node": "Update Refreshed Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Refreshed Token": {
+      "main": [
+        [{ "node": "Save Refreshed Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Save Refreshed Token": {
+      "main": [
+        [{ "node": "Build AI Context", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build AI Context": {
+      "main": [
+        [{ "node": "Call OpenAI", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call OpenAI": {
+      "main": [
+        [{ "node": "Parse AI Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [{ "node": "Route by Intent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Intent": {
+      "main": [
+        [{ "node": "Handle CREATE", "type": "main", "index": 0 }],
+        [{ "node": "Google: Query Events", "type": "main", "index": 0 }],
+        [{ "node": "Handle UPDATE", "type": "main", "index": 0 }],
+        [{ "node": "Handle DELETE", "type": "main", "index": 0 }],
+        [{ "node": "Handle GENERAL / Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle CREATE": {
+      "main": [
+        [{ "node": "Create Complete?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Complete?": {
+      "main": [
+        [{ "node": "Google: Create Event", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Create Event": {
+      "main": [
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Query Events": {
+      "main": [
+        [{ "node": "Format Query Results", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Query Results": {
+      "main": [
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle UPDATE": {
+      "main": [
+        [{ "node": "Google: Search for Update", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Search for Update": {
+      "main": [
+        [{ "node": "Prepare Update", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Update": {
+      "main": [
+        [{ "node": "Google: Update Event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Update Event": {
+      "main": [
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle DELETE": {
+      "main": [
+        [{ "node": "Google: Search for Delete", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Search for Delete": {
+      "main": [
+        [{ "node": "Prepare Delete", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Delete": {
+      "main": [
+        [{ "node": "Google: Delete Event", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google: Delete Event": {
+      "main": [
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Handle GENERAL / Error": {
+      "main": [
+        [{ "node": "Prepare Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Reply": {
+      "main": [
+        [{ "node": "Update User State", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update User State": {
+      "main": [
+        [{ "node": "Send WhatsApp Reply", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    { "name": "WhatsApp Calendar Assistant" },
+    { "name": "Main" }
+  ],
+  "triggerCount": 1,
+  "versionId": "1"
+}
