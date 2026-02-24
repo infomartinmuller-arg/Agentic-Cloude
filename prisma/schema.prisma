@@ -1,0 +1,283 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ROLES ───────────────────────────────────────────────
+enum Role {
+  OWNER
+  COORDINATOR
+  TREASURER
+  DESIGNER
+  ASSISTANT
+}
+
+// ─── ESTADOS ─────────────────────────────────────────────
+enum EventStatus {
+  BORRADOR
+  CONFIRMADO
+  EN_PRODUCCION
+  FINALIZADO
+  CANCELADO
+}
+
+enum ContractStatus {
+  PENDIENTE
+  ENVIADO
+  FIRMADO
+  VENCIDO
+}
+
+enum PaymentStatus {
+  PENDIENTE
+  PARCIAL
+  COMPLETADO
+  VENCIDO
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertType {
+  CONTRATO
+  PAGO
+  CHECKLIST
+  PROVEEDOR
+  GENERAL
+}
+
+// ─── USER ────────────────────────────────────────────────
+model User {
+  id             String   @id @default(cuid())
+  name           String
+  email          String   @unique
+  hashedPassword String
+  role           Role     @default(ASSISTANT)
+  image          String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relaciones
+  eventsCreated     Event[]            @relation("EventCreator")
+  eventResponsibles EventResponsible[]
+  alerts            Alert[]
+
+  @@map("users")
+}
+
+// ─── EVENT ───────────────────────────────────────────────
+model Event {
+  id          String      @id @default(cuid())
+  name        String
+  description String?
+  venue       String?
+  city        String?
+  date        DateTime
+  endDate     DateTime?
+  status      EventStatus @default(BORRADOR)
+  budget      Float       @default(0)
+  notes       String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Creador
+  creatorId String
+  creator   User   @relation("EventCreator", fields: [creatorId], references: [id])
+
+  // Relaciones
+  providers    EventProvider[]
+  contracts    Contract[]
+  payments     Payment[]
+  checklists   Checklist[]
+  documents    Document[]
+  alerts       Alert[]
+  responsibles EventResponsible[]
+
+  @@map("events")
+}
+
+// ─── PROVIDER (Proveedor / Artista) ─────────────────────
+model Provider {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // "proveedor", "artista", "venue", "catering", "tecnico", etc.
+  contactName String?
+  email       String?
+  phone       String?
+  website     String?
+  city        String?
+  notes       String?
+  rating      Int?     // 1-5
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relaciones
+  events   EventProvider[]
+  payments ProviderPayment[]
+
+  @@map("providers")
+}
+
+// ─── EVENT <-> PROVIDER (muchos a muchos) ────────────────
+model EventProvider {
+  id        String   @id @default(cuid())
+  role      String?  // "headliner", "soporte", "catering", etc.
+  fee       Float    @default(0)
+  confirmed Boolean  @default(false)
+  notes     String?
+  createdAt DateTime @default(now())
+
+  eventId    String
+  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, providerId])
+  @@map("event_providers")
+}
+
+// ─── CONTRACT ────────────────────────────────────────────
+model Contract {
+  id        String         @id @default(cuid())
+  title     String
+  status    ContractStatus @default(PENDIENTE)
+  amount    Float          @default(0)
+  signDate  DateTime?
+  dueDate   DateTime?
+  fileUrl   String?
+  notes     String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("contracts")
+}
+
+// ─── PAYMENT (pago general del evento) ──────────────────
+model Payment {
+  id          String        @id @default(cuid())
+  concept     String
+  amount      Float
+  status      PaymentStatus @default(PENDIENTE)
+  dueDate     DateTime?
+  paidDate    DateTime?
+  method      String?       // "transferencia", "efectivo", "cheque"
+  reference   String?
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  providerPayment ProviderPayment?
+
+  @@map("payments")
+}
+
+// ─── PROVIDER PAYMENT (liga un pago a un proveedor) ─────
+model ProviderPayment {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+
+  paymentId  String   @unique
+  payment    Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@map("provider_payments")
+}
+
+// ─── CHECKLIST ───────────────────────────────────────────
+model Checklist {
+  id        String          @id @default(cuid())
+  title     String
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  items ChecklistItem[]
+
+  @@map("checklists")
+}
+
+// ─── CHECKLIST ITEM ──────────────────────────────────────
+model ChecklistItem {
+  id          String    @id @default(cuid())
+  text        String
+  completed   Boolean   @default(false)
+  dueDate     DateTime?
+  assignee    String?
+  sortOrder   Int       @default(0)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  checklistId String
+  checklist   Checklist @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+
+  @@map("checklist_items")
+}
+
+// ─── DOCUMENT ────────────────────────────────────────────
+model Document {
+  id        String   @id @default(cuid())
+  name      String
+  type      String   // "contrato", "rider", "plano", "factura", "otro"
+  fileUrl   String
+  fileSize  Int?
+  mimeType  String?
+  notes     String?
+  createdAt DateTime @default(now())
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@map("documents")
+}
+
+// ─── ALERT ───────────────────────────────────────────────
+model Alert {
+  id        String        @id @default(cuid())
+  title     String
+  message   String
+  type      AlertType
+  severity  AlertSeverity @default(INFO)
+  read      Boolean       @default(false)
+  link      String?
+  createdAt DateTime      @default(now())
+
+  eventId String?
+  event   Event?  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId  String?
+  user    User?   @relation(fields: [userId], references: [id])
+
+  @@map("alerts")
+}
+
+// ─── EVENT RESPONSIBLE ───────────────────────────────────
+model EventResponsible {
+  id        String   @id @default(cuid())
+  role      String   // "director", "produccion", "sonido", "luces", etc.
+  createdAt DateTime @default(now())
+
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id])
+
+  @@unique([eventId, userId, role])
+  @@map("event_responsibles")
+}
