@@ -20,11 +20,11 @@ import {
   CreditCard,
   AlertTriangle,
   UserCheck,
-  Edit,
   Trash2,
 } from "lucide-react";
 import { formatCurrency, formatDate, daysUntil } from "@/lib/utils";
 import { deleteEvent } from "../actions";
+import { EditEventDialog } from "./edit-event-dialog";
 import { EventContractsTab } from "./tabs/contracts-tab";
 import { EventPaymentsTab } from "./tabs/payments-tab";
 import { EventProvidersTab } from "./tabs/providers-tab";
@@ -110,9 +110,7 @@ export function EventHub({ event }: { event: any }) {
           </div>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled>
-            <Edit className="mr-1 h-4 w-4" /> Editar
-          </Button>
+          <EditEventDialog event={event} />
           <Button
             variant="destructive"
             size="sm"

@@ -99,11 +99,11 @@ const alertRules: AlertRule[] = [
 
   // Regla: Pagos vencidos (cualquier momento)
   {
-    check(event, daysLeft) {
-      if (daysLeft < 0) return [];
-
+    check(event, _daysLeft) {
       const overduePayments = event.payments.filter(
-        (p: any) => p.dueDate && new Date(p.dueDate) < new Date() && p.status !== "COMPLETADO"
+        (p: any) =>
+          p.status === "VENCIDO" ||
+          (p.dueDate && new Date(p.dueDate) < new Date() && p.status !== "COMPLETADO")
       );
       if (overduePayments.length === 0) return [];
 
@@ -179,11 +179,10 @@ const alertRules: AlertRule[] = [
 ];
 
 export async function generateAlerts(): Promise<number> {
-  // Traer eventos activos con toda su info
+  // Traer eventos activos (incluyendo multi-día que ya empezaron)
   const events = await db.event.findMany({
     where: {
       status: { in: ["CONFIRMADO", "EN_PRODUCCION"] },
-      date: { gte: new Date() },
     },
     include: {
       contracts: true,
@@ -199,8 +198,14 @@ export async function generateAlerts(): Promise<number> {
   for (const event of events) {
     const days = daysUntil(event.date);
 
-    // > 2 meses: no generar alertas
-    if (days > 60) continue;
+    // > 2 meses: no generar alertas (excepto pagos vencidos)
+    if (days > 60) {
+      // Solo verificar pagos vencidos para eventos lejanos
+      const overdueRule = alertRules[3];
+      const candidates = overdueRule.check(event, days);
+      allCandidates.push(...candidates);
+      continue;
+    }
 
     for (const rule of alertRules) {
       const candidates = rule.check(event, days);
@@ -208,8 +213,11 @@ export async function generateAlerts(): Promise<number> {
     }
   }
 
-  // Limpiar alertas no leídas anteriores y crear nuevas
-  await db.alert.deleteMany({ where: { read: false } });
+  // Archivar alertas anteriores no leídas en vez de borrarlas
+  await db.alert.updateMany({
+    where: { read: false },
+    data: { read: true },
+  });
 
   if (allCandidates.length > 0) {
     await db.alert.createMany({
@@ -225,4 +233,8 @@ export async function generateAlerts(): Promise<number> {
   }
 
   return allCandidates.length;
+}
+
+export async function getUnreadAlertCount(): Promise<number> {
+  return db.alert.count({ where: { read: false } });
 }

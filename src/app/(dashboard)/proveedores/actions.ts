@@ -9,12 +9,12 @@ const providerSchema = z.object({
   name: z.string().min(1, "El nombre es obligatorio"),
   type: z.string().min(1, "El tipo es obligatorio"),
   contactName: z.string().optional(),
-  email: z.string().email().optional().or(z.literal("")),
+  email: z.string().email("Email inválido").optional().or(z.literal("")),
   phone: z.string().optional(),
   website: z.string().optional(),
   city: z.string().optional(),
   notes: z.string().optional(),
-  rating: z.coerce.number().min(1).max(5).optional(),
+  rating: z.coerce.number().min(1).max(5).optional().or(z.literal(NaN).transform(() => undefined)),
 });
 
 export async function getProviders(filters?: { type?: string; search?: string }) {
@@ -47,31 +47,47 @@ export async function createProvider(formData: FormData) {
   await requireRole(["OWNER", "COORDINATOR"]);
 
   const raw = Object.fromEntries(formData.entries());
-  const parsed = providerSchema.parse(raw);
 
-  await db.provider.create({
-    data: {
-      name: parsed.name,
-      type: parsed.type,
-      contactName: parsed.contactName || null,
-      email: parsed.email || null,
-      phone: parsed.phone || null,
-      website: parsed.website || null,
-      city: parsed.city || null,
-      notes: parsed.notes || null,
-      rating: parsed.rating || null,
-    },
-  });
+  const result = providerSchema.safeParse(raw);
+  if (!result.success) {
+    return { success: false, error: result.error.errors[0]?.message || "Datos inválidos" };
+  }
+  const parsed = result.data;
 
-  revalidatePath("/proveedores");
-  return { success: true };
+  try {
+    await db.provider.create({
+      data: {
+        name: parsed.name,
+        type: parsed.type,
+        contactName: parsed.contactName || null,
+        email: parsed.email || null,
+        phone: parsed.phone || null,
+        website: parsed.website || null,
+        city: parsed.city || null,
+        notes: parsed.notes || null,
+        rating: parsed.rating || null,
+      },
+    });
+
+    revalidatePath("/proveedores");
+    return { success: true };
+  } catch (err) {
+    console.error("Error creando proveedor:", err);
+    return { success: false, error: "Error al crear el proveedor" };
+  }
 }
 
 export async function deleteProvider(id: string) {
   await requireRole(["OWNER"]);
-  await db.provider.update({ where: { id }, data: { active: false } });
-  revalidatePath("/proveedores");
-  return { success: true };
+
+  try {
+    await db.provider.update({ where: { id }, data: { active: false } });
+    revalidatePath("/proveedores");
+    return { success: true };
+  } catch (err) {
+    console.error("Error desactivando proveedor:", err);
+    return { success: false, error: "Error al eliminar el proveedor" };
+  }
 }
 
 export async function getProviderTypes() {

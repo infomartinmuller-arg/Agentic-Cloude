@@ -4,9 +4,18 @@ import { NextResponse } from "next/server";
 export default auth((req) => {
   const isLoggedIn = !!req.auth;
   const isLoginPage = req.nextUrl.pathname === "/login";
-  const isApiRoute = req.nextUrl.pathname.startsWith("/api");
+  const isApiAuthRoute = req.nextUrl.pathname.startsWith("/api/auth");
 
-  if (isApiRoute) return NextResponse.next();
+  // Auth.js routes always pass through
+  if (isApiAuthRoute) return NextResponse.next();
+
+  // API routes require authentication
+  if (req.nextUrl.pathname.startsWith("/api")) {
+    if (!isLoggedIn) {
+      return NextResponse.json({ error: "No autorizado" }, { status: 401 });
+    }
+    return NextResponse.next();
+  }
 
   if (isLoginPage) {
     if (isLoggedIn) {
